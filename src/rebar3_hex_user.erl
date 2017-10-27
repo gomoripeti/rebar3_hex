@@ -56,7 +56,10 @@ do(State) ->
             reset_password(),
             {ok, State};
         [] ->
-            {ok, State}
+            rebar_api:info("Usage: rebar3 hex user register | whoami | auth | deauth | reset_password", []),
+            {ok, State};
+        Command ->
+            ?PRV_ERROR({bad_command, Command})
     end.
 
 -spec format_error(any()) -> iolist().
