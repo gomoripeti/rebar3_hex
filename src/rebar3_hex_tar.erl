@@ -1,10 +1,17 @@
 -module(rebar3_hex_tar).
 
--export([create/4]).
+-export([create/4,
+         create_file/4]).
 
 -include("rebar3_hex.hrl").
 
 create(Name, Version, Meta, Files) ->
+    {ok, Path} = create_file(Name, Version, Meta, Files),
+    Tar = file:read_file(Path),
+    file:delete(Path),
+    Tar.
+
+create_file(Name, Version, Meta, Files) ->
     ContentsPath = io_lib:format("~s-~s-contents.tar.gz", [Name, Version]),
     Path = io_lib:format("~s-~s.tar", [Name, Version]),
     ok = erl_tar:create(ContentsPath, Files, [compressed]),
@@ -24,10 +31,8 @@ create(Name, Version, Meta, Files) ->
                 ],
 
     ok = erl_tar:create(Path, MetaFiles),
-    Tar = file:read_file(Path),
     file:delete(ContentsPath),
-    file:delete(Path),
-    Tar.
+    {ok, Path}.
 
 encode_term(Meta) ->
     Data = lists:map(fun(MetaPair) ->

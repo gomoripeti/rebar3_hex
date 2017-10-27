@@ -34,7 +34,8 @@ init(State) ->
                                 {example, "rebar3 hex publish"},
                                 {short_desc, "Publish a new version of your package and update the package"},
                                 {desc, ""},
-                                {opts, [{revert, undefined, "revert", string, "Revert given version."}]}
+                                {opts, [{revert, undefined, "revert", string, "Revert given version."},
+                                        {dry, $d, "dry", undefined, "Create tarball but don't upload pacakge."}]}
                                 ]),
     State1 = rebar_state:add_provider(State, Provider),
     {ok, State1}.
@@ -74,9 +75,10 @@ do_(App, State) ->
 
     {Args, _} = rebar_state:command_parsed_args(State),
     Revert = proplists:get_value(revert, Args, undefined),
+    Dry = proplists:get_value(dry, Args, false),
     case Revert of
         undefined ->
-            case publish(App, State) of
+            case publish(App, State, Dry) of
                 ok ->
                     {ok, State};
                 stopped ->
@@ -94,6 +96,9 @@ do_(App, State) ->
     end.
 
 publish(App, State) ->
+    publish(App, State, _Dry = false).
+
+publish(App, State, Dry) ->
     AppDir = rebar_app_info:dir(App),
     Name = rebar_app_info:name(App),
 
@@ -109,7 +114,7 @@ publish(App, State) ->
 
     case validate_app_details(AppDetails) of
         ok ->
-            publish(AppDir, Name, ResolvedVersion, TopLevel, Excluded, AppDetails);
+            publish(AppDir, Name, ResolvedVersion, TopLevel, Excluded, AppDetails, Dry);
         Error ->
             Error
     end.
@@ -132,6 +137,9 @@ exclude_file(Path, ExcludeFiles, ExcludeRe) ->
         known_exclude_file(Path, ExcludeRe).
 
 publish(AppDir, Name, Version, Deps, [], AppDetails) ->
+    publish(AppDir, Name, Version, Deps, [], AppDetails, _Dry = false).
+
+publish(AppDir, Name, Version, Deps, [], AppDetails, Dry) ->
     Config = rebar_config:consult(AppDir),
     ConfigDeps = proplists:get_value(deps, Config, []),
     Deps1 = update_versions(ConfigDeps, Deps),
@@ -189,14 +197,19 @@ publish(AppDir, Name, Version, Deps, [], AppDetails) ->
     ec_talk:say("  Links:~n    ~s", [format_links(Links)]),
     ec_talk:say("  Build tools: ~s", [format_build_tools(BuildTools)]),
     ec_talk:say("Before publishing, please read Hex CoC: https://hex.pm/policies/codeofconduct", []),
+    ec_talk:say("  Dry run: ~p", [Dry]),
     case ec_talk:ask_default("Proceed?", boolean, "Y") of
+        true when Dry =:= true ->
+            {ok, TarFile} = rebar3_hex_tar:create_file(Name, Version, Meta, Files),
+            rebar_api:info("Created tar pkg ~s ~s: ~s", [Name, Version, TarFile]),
+            ok;
         true ->
             upload_package(Auth, PkgName, Version, Meta, FilesAndApp);
         _ ->
             ec_talk:say("Goodbye..."),
             stopped
     end;
-publish(_AppDir, _Name, _Version, _Deps, Excluded, _AppDetails) ->
+publish(_AppDir, _Name, _Version, _Deps, Excluded, _AppDetails, _Dry) ->
     ?PRV_ERROR({non_hex_deps, Excluded}).
 
 %% Internal functions
