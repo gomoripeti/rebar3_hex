@@ -35,7 +35,9 @@ init(State) ->
                                 {short_desc, "Publish a new version of your package and update the package"},
                                 {desc, ""},
                                 {opts, [{revert, undefined, "revert", string, "Revert given version."},
-                                        {dry, $d, "dry", undefined, "Create tarball but don't upload pacakge."}]}
+                                        {dry, $d, "dry", undefined, "Create tarball but don't upload pacakge."},
+                                        {deps_from_config, undefined, "deps_from_config", undefined,
+                                         "Take package deps from rebar.config instead of lock file"}]}
                                 ]),
     State1 = rebar_state:add_provider(State, Provider),
     {ok, State1}.
@@ -75,10 +77,9 @@ do_(App, State) ->
 
     {Args, _} = rebar_state:command_parsed_args(State),
     Revert = proplists:get_value(revert, Args, undefined),
-    Dry = proplists:get_value(dry, Args, false),
     case Revert of
         undefined ->
-            case publish(App, State, Dry) of
+            case publish(App, State) of
                 ok ->
                     {ok, State};
                 stopped ->
@@ -96,16 +97,10 @@ do_(App, State) ->
     end.
 
 publish(App, State) ->
-    publish(App, State, _Dry = false).
-
-publish(App, State, Dry) ->
     AppDir = rebar_app_info:dir(App),
     Name = rebar_app_info:name(App),
 
-    Version = rebar_app_info:original_vsn(App),
-    ResolvedVersion = rebar_utils:vcs_vsn(Version,
-                                          rebar_app_info:dir(App),
-                                          rebar_state:resources(State)),
+    ResolvedVersion = resolve_version(App, State),
     {application, _, AppDetails} = rebar3_hex_utils:update_app_src(App, ResolvedVersion),
 
     Deps = rebar_state:get(State, {locks, default}, []),
@@ -114,7 +109,7 @@ publish(App, State, Dry) ->
 
     case validate_app_details(AppDetails) of
         ok ->
-            publish(AppDir, Name, ResolvedVersion, TopLevel, Excluded, AppDetails, Dry);
+            publish(AppDir, Name, ResolvedVersion, TopLevel, Excluded, AppDetails, State);
         Error ->
             Error
     end.
@@ -137,13 +132,24 @@ exclude_file(Path, ExcludeFiles, ExcludeRe) ->
         known_exclude_file(Path, ExcludeRe).
 
 publish(AppDir, Name, Version, Deps, [], AppDetails) ->
-    publish(AppDir, Name, Version, Deps, [], AppDetails, _Dry = false).
+    publish(AppDir, Name, Version, Deps, [], AppDetails, _State = undefined).
 
-publish(AppDir, Name, Version, Deps, [], AppDetails, Dry) ->
+publish(AppDir, Name, Version, Deps, [], AppDetails, State) ->
+    {Args, _} =
+        case State of
+            undefined -> {[], []};
+            _ -> rebar_state:command_parsed_args(State)
+        end,
+    Dry = proplists:get_value(dry, Args, false),
+    DepsSource =
+        case proplists:get_value(deps_from_config, Args, false) of
+            true -> from_config;
+            false -> from_lock
+        end,
+
     Config = rebar_config:consult(AppDir),
     ConfigDeps = proplists:get_value(deps, Config, []),
-    Deps1 = update_versions(ConfigDeps, Deps),
-
+    Deps1 = update_versions(DepsSource, ConfigDeps, Deps, State),
     Description = list_to_binary(proplists:get_value(description, AppDetails, "")),
     FilePaths = proplists:get_value(files, AppDetails, ?DEFAULT_FILES),
     IncludeFilePaths = proplists:get_value(include_files, AppDetails, []),
@@ -190,7 +196,7 @@ publish(AppDir, Name, Version, Deps, [], AppDetails, Dry) ->
     {ok, Auth} = rebar3_hex_config:auth(),
     ec_talk:say("Publishing ~s ~s", [PkgName, Version]),
     ec_talk:say("  Description: ~s", [Description]),
-    ec_talk:say("  Dependencies:~n    ~s", [format_deps(Deps1)]),
+    ec_talk:say("  Dependencies (~p):~n    ~s", [DepsSource, format_deps(Deps1)]),
     ec_talk:say("  Included files:~n    ~s", [string:join(Filenames, "\n    ")]),
     ec_talk:say("  Maintainers:~n    ~s", [format_maintainers(Maintainers)]),
     ec_talk:say("  Licenses: ~s", [format_licenses(Licenses)]),
@@ -283,7 +289,7 @@ format_links(Links) ->
 format_build_tools(BuildTools) ->
     string:join([io_lib:format("~s", [Tool]) || Tool <- BuildTools], ", ").
 
-update_versions(ConfigDeps, Deps) ->
+update_versions(from_lock, ConfigDeps, Deps, _State) ->
     [begin
          case lists:keyfind(binary_to_atom(N, utf8), 1, ConfigDeps) of
              {_, V} when is_list(V) ->
@@ -293,7 +299,59 @@ update_versions(ConfigDeps, Deps) ->
                  {_, Version} = lists:keyfind(<<"requirement">>, 1, M),
                  {N, maps:from_list(lists:keyreplace(<<"requirement">>, 1, M, {<<"requirement">>, <<"~>", Version/binary>>}))}
          end
-     end || {N, M} <- Deps].
+     end || {N, M} <- Deps];
+update_versions(from_config, ConfigDeps, Deps, State) ->
+    lists:filtermap(
+      fun({NameAtom, V}) when is_list(V) ->
+              {true, update_version(NameAtom, V, Deps, State)};
+         (NameAtom) when is_atom(NameAtom) ->
+              %% package without version
+              {true, update_version(NameAtom, undefined, Deps, State)};
+         (_) ->
+              false
+      end, ConfigDeps).
+
+update_version(NameAtom, Vsn, LockDeps, State) ->
+    NameBin = atom_to_binary(NameAtom, utf8),
+    case lists:keyfind(NameBin, 1, LockDeps) of
+        {_, M} ->
+            {_, AppName} = lists:keyfind(<<"app">>, 1, M),
+            V = get_vsn(Vsn, M),
+            {NameBin, dep_meta(AppName, V)};
+        false ->
+            %% maybe project app (assuming package name = app name)
+            case [App || App <- rebar_state:project_apps(State),
+                         NameBin =:= rebar_app_info:name(App)] of
+                [App] ->
+                    V = get_vsn(Vsn, {App, State}),
+                    {NameBin, dep_meta(NameBin, V)};
+                [] ->
+                    error(errors_to_string({<<"dependency from config not found in locks">>, NameBin}))
+            end
+    end.
+
+get_vsn(undefined, {App, State}) ->
+    %% get project app version
+    resolve_version(App, State);
+get_vsn(undefined, M) ->
+    %% using version from lock. prepend ~> to make it looser
+    {_, Version} = lists:keyfind(<<"requirement">>, 1, M),
+    <<"~>", Version/binary>>;
+get_vsn(V, _) ->
+    %% version from config deps has precedence if available
+    list_to_binary(V).
+
+dep_meta(AppName, Vsn) when is_list(Vsn) ->
+    dep_meta(AppName, list_to_binary(Vsn));
+dep_meta(AppName, Vsn) when is_binary(Vsn) ->
+    maps:from_list([{<<"app">>, AppName}, {<<"optional">>, false}, {<<"requirement">>, Vsn}]).
+
+resolve_version(App, State) ->
+    Version = rebar_app_info:original_vsn(App),
+    ResolvedVersion = rebar_utils:vcs_vsn(Version,
+                                          rebar_app_info:dir(App),
+                                          rebar_state:resources(State)),
+    ResolvedVersion.
 
 -ifdef(TEST).
 
