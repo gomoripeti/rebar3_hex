@@ -7,7 +7,8 @@
 -include("rebar3_hex.hrl").
 
 -define(PROVIDER, docs).
--define(DEPS, [{default, edoc}]).
+%-define(DEPS, [{default, edoc}]).
+-define(DEPS, [{default, lock}]).
 
 -define(ENDPOINT, "packages").
 
