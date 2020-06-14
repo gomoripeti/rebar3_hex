@@ -149,7 +149,8 @@ publish(AppDir, Name, Version, Deps, [], AppDetails, State) ->
 
     Config = rebar_config:consult(AppDir),
     ConfigDeps = proplists:get_value(deps, Config, []),
-    Deps1 = update_versions(DepsSource, ConfigDeps, Deps, State),
+    ConfigHexDeps = proplists:get_value(hex_deps, Config, []),
+    Deps1 = update_versions(DepsSource, ConfigDeps ++ ConfigHexDeps, Deps, State),
     Description = list_to_binary(proplists:get_value(description, AppDetails, "")),
     FilePaths = proplists:get_value(files, AppDetails, ?DEFAULT_FILES),
     IncludeFilePaths = proplists:get_value(include_files, AppDetails, []),
